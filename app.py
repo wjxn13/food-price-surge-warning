@@ -1,5 +1,5 @@
 """
-食品价格飙升预警仪表盘 (Streamlit) - 中英双语版（动态数据截止日期）
+食品价格飙升预警仪表盘 (Streamlit) - 中英双语版（最终修复版）
 """
 import streamlit as st
 import pandas as pd
@@ -12,12 +12,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
 
-# -------------------- 页面配置 --------------------
 st.set_page_config(page_title="食品价格飙升预警", layout="wide")
 st.title("🌍 全球食品价格异常飙升预警系统")
 
-# -------------------- 国家 / 类别中英文映射 --------------------
 COUNTRY_CN = {
     "AFG": "阿富汗", "ALB": "阿尔巴尼亚", "DZA": "阿尔及利亚", "AGO": "安哥拉", "ARG": "阿根廷",
     "ARM": "亚美尼亚", "AZE": "阿塞拜疆", "BGD": "孟加拉国", "BLR": "白俄罗斯", "BEN": "贝宁",
@@ -71,7 +71,6 @@ def format_category(cat):
         return "未知"
     return f"{CATEGORY_CN.get(cat, cat)}"
 
-# -------------------- 加载模型 --------------------
 @st.cache_resource
 def load_models():
     with open('feat_cols.json', 'r') as f:
@@ -106,11 +105,9 @@ def load_models():
 
 feat_cols, scaler, lgb_model, xgb_model, mlp_model, meta_model, device = load_models()
 
-# -------------------- 加载特征和静态信息（动态日期） --------------------
 @st.cache_data
 def load_feature_data():
     feature_df = pd.read_parquet('features_v4.parquet')
-    # 动态获取数据中的最大日期作为 target_date
     target_date = feature_df['date'].max()
     current = feature_df[feature_df['date'] <= target_date].sort_values('date').groupby('series_id').last().reset_index()
     return current, target_date
@@ -131,12 +128,10 @@ def load_static_map():
 
 static_df = load_static_map()
 
-# 合并静态信息
 current_with_static = current_data.merge(static_df, on='series_id', how='left')
 current_with_static['country_display'] = current_with_static['countryiso3'].apply(format_country)
 current_with_static['category_display'] = current_with_static['category'].apply(format_category)
 
-# -------------------- 预警概率计算 --------------------
 def predict_warning_prob(data_df):
     X = data_df[feat_cols].values
     X_scaled = scaler.transform(X)
@@ -152,7 +147,7 @@ def predict_warning_prob(data_df):
 
 current_with_static['warning_prob'] = predict_warning_prob(current_with_static)
 
-# -------------------- 侧边栏：筛选条件 --------------------
+# 侧边栏
 st.sidebar.header("筛选条件")
 country_display_all = sorted(current_with_static['country_display'].unique())
 selected_country_display = st.sidebar.selectbox("选择国家", ["全部"] + country_display_all)
@@ -179,15 +174,15 @@ if selected_category_code:
 
 filtered_sorted = filtered.sort_values('warning_prob', ascending=False)
 
-# -------------------- 主界面：风险表格 --------------------
+# 风险表格
 st.subheader(f"高风险商品 Top 20 (当前筛选: {selected_country_display if selected_country_display!='全部' else '所有国家'}, {selected_category_display if selected_category_display!='全部' else '所有类别'})")
 
 table_df = filtered_sorted.head(20)[['country_display', 'category_display', 'commodity', 'warning_prob']].copy()
 table_df.columns = ['国家', '类别', '商品', '飙升概率']
 table_df['飙升概率'] = table_df['飙升概率'].apply(lambda x: f"{x:.2%}")
-st.dataframe(table_df, use_container_width=True)
+st.dataframe(table_df, width='stretch')
 
-# -------------------- 风险热力图 --------------------
+# 风险热力图
 heat_df = filtered_sorted.head(20).copy()
 heat_df['label'] = heat_df['country_display'] + ' - ' + heat_df['commodity']
 
@@ -202,47 +197,72 @@ fig_bar = px.bar(
     title="风险热力图 (Top 20)"
 )
 fig_bar.update_layout(yaxis={'categoryorder': 'total ascending'})
-st.plotly_chart(fig_bar, use_container_width=True)
+st.plotly_chart(fig_bar, width='stretch')
 
-# -------------------- 历史价格走势 --------------------
+# 历史价格走势
 st.subheader("历史价格走势 & 预警概率")
-series_choices = filtered_sorted[['series_id', 'country_display', 'category_display', 'commodity', 'warning_prob']].copy()
-series_choices['label'] = series_choices['country_display'] + ' - ' + series_choices['commodity'] + ' (概率: ' + series_choices['warning_prob'].apply(lambda x: f"{x:.1%}") + ')'
-selected_label = st.selectbox("选择商品序列查看详情", series_choices['label'].tolist())
-selected_series = series_choices[series_choices['label'] == selected_label]['series_id'].values[0]
-
-@st.cache_data
-def load_price_history():
-    return pd.read_parquet('price_series.parquet')
-
-price_df = load_price_history()
-series_price = price_df[price_df['series_id'] == selected_series].sort_values('date')
-current_warning = filtered_sorted[filtered_sorted['series_id'] == selected_series]['warning_prob'].values[0]
-
-fig_ts = go.Figure()
-fig_ts.add_trace(go.Scatter(
-    x=series_price['date'],
-    y=series_price['usdprice'],
-    mode='lines+markers',
-    name='USD 价格'
-))
-if not series_price.empty:
-    fig_ts.add_annotation(
-        x=series_price['date'].iloc[-1],
-        y=series_price['usdprice'].iloc[-1],
-        text=f"当前预警概率: {current_warning:.1%}",
-        showarrow=True,
-        arrowhead=1,
-        ax=40,
-        ay=-30
+if filtered_sorted.empty:
+    st.warning("当前筛选条件下没有数据，请调整筛选条件")
+else:
+    series_choices = filtered_sorted[['series_id', 'country_display', 'commodity', 'warning_prob']].copy()
+    # 关键修复：确保所有列为纯字符串，使用 .apply(str) 或 astype(str) 并填充 NaN
+    series_choices = series_choices.fillna({'country_display': '未知', 'commodity': '未知商品', 'warning_prob': 0})
+    series_choices['prob_str'] = series_choices['warning_prob'].apply(lambda x: f"{x:.1%}" if isinstance(x, (int, float)) else "概率未知")
+    series_choices['label'] = (
+        series_choices['country_display'].astype(str)
+        + ' - '
+        + series_choices['commodity'].astype(str)
+        + ' (概率: '
+        + series_choices['prob_str']
+        + ')'
     )
-fig_ts.update_layout(title=f"历史价格走势 - {selected_label}", xaxis_title="日期", yaxis_title="USD 价格")
-st.plotly_chart(fig_ts, use_container_width=True)
+    labels = series_choices['label'].tolist()
+    if not labels:
+        st.warning("没有可供选择的商品序列")
+    else:
+        selected_label = st.selectbox("选择商品序列查看详情", labels)
+        # 通过 label 查找 series_id
+        match = series_choices[series_choices['label'] == selected_label]
+        if not match.empty:
+            selected_series = match['series_id'].values[0]
+        else:
+            selected_series = series_choices['series_id'].values[0]  # fallback
 
-with st.expander("查看该商品最新特征值"):
-    series_feat = current_data[current_data['series_id'] == selected_series]
-    if not series_feat.empty:
-        st.dataframe(series_feat[feat_cols].T.rename(columns={series_feat.index[0]: '特征值'}))
+        @st.cache_data
+        def load_price_history():
+            return pd.read_parquet('price_series.parquet')
+
+        price_df = load_price_history()
+        series_price = price_df[price_df['series_id'] == selected_series].sort_values('date')
+        if not series_price.empty:
+            current_warning = filtered_sorted[filtered_sorted['series_id'] == selected_series]['warning_prob'].values[0]
+        else:
+            current_warning = 0.0
+
+        fig_ts = go.Figure()
+        fig_ts.add_trace(go.Scatter(
+            x=series_price['date'],
+            y=series_price['usdprice'],
+            mode='lines+markers',
+            name='USD 价格'
+        ))
+        if not series_price.empty:
+            fig_ts.add_annotation(
+                x=series_price['date'].iloc[-1],
+                y=series_price['usdprice'].iloc[-1],
+                text=f"当前预警概率: {current_warning:.1%}",
+                showarrow=True,
+                arrowhead=1,
+                ax=40,
+                ay=-30
+            )
+        fig_ts.update_layout(title=f"历史价格走势 - {selected_label}", xaxis_title="日期", yaxis_title="USD 价格")
+        st.plotly_chart(fig_ts, width='stretch')
+
+        with st.expander("查看该商品最新特征值"):
+            series_feat = current_data[current_data['series_id'] == selected_series]
+            if not series_feat.empty:
+                st.dataframe(series_feat[feat_cols].T.rename(columns={series_feat.index[0]: '特征值'}), width='stretch')
 
 st.markdown("---")
 st.caption(f"数据截止: {target_date.date()} | 模型: LightGBM + XGBoost + MLP 集成")

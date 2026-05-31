@@ -1,6 +1,5 @@
 """
-自动更新脚本：通过 kaggle CLI 获取 Last Updated 时间 → 条件下载 → 重训练
-纯文本解析，无额外依赖
+自动更新脚本：检测 Kaggle 更新 → 条件下载 → 重训练（增强日志与超时）
 """
 import subprocess
 from pathlib import Path
@@ -19,38 +18,49 @@ def log(msg):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
-def get_dataset_last_updated():
-    """运行 kaggle datasets metadata 并提取 Last Updated 时间"""
+def run_with_timeout(cmd, timeout=30):
+    """带超时的 subprocess 调用"""
+    log(f"执行命令: {' '.join(cmd)}")
     try:
-        result = subprocess.run(
-            ["kaggle", "datasets", "metadata", DATASET_PATH],
-            capture_output=True, text=True, check=True
-        )
-        output = result.stdout
-        # 调试：可将输出记录到日志（可选）
-        # log(f"元数据输出:\n{output}")
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
+        log(f"命令成功，返回码 {result.returncode}")
+        return result
+    except subprocess.TimeoutExpired:
+        log(f"❌ 命令超时（{timeout} 秒）")
+        raise
+    except subprocess.CalledProcessError as e:
+        log(f"❌ 命令返回错误码 {e.returncode}: {e.stderr}")
+        raise
 
-        # 匹配类似 "Last Updated: 2026-05-31 10:00:00" 的行
+def get_dataset_last_updated():
+    """获取数据集最后更新时间（优先元数据，备用文件列表）"""
+    log("正在获取数据集元数据...")
+    try:
+        result = run_with_timeout(["kaggle", "datasets", "metadata", DATASET_PATH], timeout=15)
+        output = result.stdout
         match = re.search(r"Last Updated:\s+([\d\-]+\s+[\d:]+)", output)
         if match:
             return match.group(1).strip()
         else:
-            log("⚠️ 在元数据中未找到 Last Updated 字段，尝试使用文件列表最新日期")
-            # 备用方案：获取文件列表，提取最新日期
-            files_result = subprocess.run(
-                ["kaggle", "datasets", "files", DATASET_PATH],
-                capture_output=True, text=True, check=True
-            )
-            # 简单寻找日期格式 YYYY-MM-DD 的最晚时间
-            dates = re.findall(r"(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}", files_result.stdout)
-            if dates:
-                # 取最大日期作为版本（实际可能不够精确，但可用）
-                latest = max(dates)
-                log(f"从文件列表提取的最新日期: {latest}")
-                return latest
+            log("⚠️ 元数据中未找到 Last Updated 字段，尝试文件列表")
+    except Exception as e:
+        log(f"⚠️ 获取元数据失败: {e}，尝试文件列表")
+
+    # 备用方案：通过文件列表提取最新日期
+    log("正在获取文件列表...")
+    try:
+        result = run_with_timeout(["kaggle", "datasets", "files", DATASET_PATH], timeout=20)
+        output = result.stdout
+        dates = re.findall(r"(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}", output)
+        if dates:
+            latest = max(dates)
+            log(f"从文件列表提取的最新日期: {latest}")
+            return latest
+        else:
+            log("❌ 文件列表中未找到日期")
             return None
-    except subprocess.CalledProcessError as e:
-        log(f"❌ 获取元数据失败: {e.stderr}")
+    except Exception as e:
+        log(f"❌ 文件列表获取失败: {e}")
         return None
 
 def read_last_updated():
