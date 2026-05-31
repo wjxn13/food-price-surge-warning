@@ -15,9 +15,10 @@ warnings.filterwarnings('ignore')
 
 # ==================== 配置 ====================
 DATA_DIR = Path("D:/.kaggle/食品价格/食品价格")
+# 初始值会被自动更新，仅占位
 CURRENT_DATE = pd.Timestamp('2026-05-31')
 LOOKAHEAD = 3
-SURGE_THRESHOLD = 0.15            # 降低至 15%
+SURGE_THRESHOLD = 0.15
 WINDOW_SIZE = 12
 N_JOBS = -1
 
@@ -26,6 +27,7 @@ def log(msg):
 
 # -------------------- 1. 数据加载 --------------------
 def load_and_clean_data():
+    global CURRENT_DATE          # 声明为全局变量
     log("开始加载数据...")
     csv_files = sorted(DATA_DIR.glob("wfp_food_prices_global_*.csv"))
     df_list = []
@@ -40,6 +42,11 @@ def load_and_clean_data():
     df = df.dropna(subset=['market_id', 'commodity_id', 'usdprice', 'price'])
     df['series_id'] = df['market_id'].astype(str) + '_' + df['commodity_id'].astype(str)
     log(f"数据加载完成，序列数: {df['series_id'].nunique()}")
+
+    # 动态更新 CURRENT_DATE 为数据中实际的最大日期
+    CURRENT_DATE = df['date'].max()
+    log(f"当前数据截止日期已更新为: {CURRENT_DATE.date()}")
+
     return df
 
 # -------------------- 2. 月度面板 --------------------
@@ -105,7 +112,6 @@ def build_features_enhanced(grp):
     feat_list = []
     for i in range(WINDOW_SIZE, n - LOOKAHEAD):
         past = prices[i - WINDOW_SIZE : i]
-        # 原有基础特征
         ret_1 = (prices[i-1] - prices[i-2]) / prices[i-2] if i>=2 and prices[i-2]>0 else 0
         ret_3 = (prices[i-1] - prices[i-4]) / prices[i-4] if i>=4 and prices[i-4]>0 else 0
         ret_6 = (prices[i-1] - prices[i-7]) / prices[i-7] if i>=7 and prices[i-7]>0 else 0
@@ -117,16 +123,12 @@ def build_features_enhanced(grp):
         sin_m = np.sin(2 * np.pi * month / 12)
         cos_m = np.cos(2 * np.pi * month / 12)
 
-        # ---- 新增短期特征 ----
-        # 过去3个月价格窗口
         short_past = past[-3:] if len(past) >= 3 else past
         vol_3 = np.std(short_past) / (np.mean(short_past) + 1e-6) if len(short_past) > 1 else 0
-        # 价格振幅：(最高-最低)/平均
         if len(short_past) > 1:
             range_3 = (np.max(short_past) - np.min(short_past)) / (np.mean(short_past) + 1e-6)
         else:
             range_3 = 0
-        # 短期加速：ret_3m 的一阶差分（近似加速度）
         if i >= 4:
             prev_ret_3 = (prices[i-2] - prices[i-5]) / prices[i-5] if i>=5 and prices[i-5]>0 else 0
             ret_3m_accel = ret_3 - prev_ret_3
@@ -164,31 +166,26 @@ def add_global_features(feature_df, monthly):
     feature_df = feature_df.merge(static, on='series_id', how='left')
     feature_df['year_month'] = feature_df['date'].dt.to_period('M')
 
-    # 相对强度
     cat_avg = feature_df.groupby(['countryiso3', 'category', 'year_month'])['ret_3m'].transform('mean')
     feature_df['rel_strength'] = feature_df['ret_3m'] - cat_avg
 
-    # 货币压力
     monthly['local_ret_3'] = monthly.groupby('series_id')['price'].pct_change(3)
     monthly_key = monthly[['series_id', 'date', 'local_ret_3']].dropna()
     feature_df = feature_df.merge(monthly_key, on=['series_id', 'date'], how='left')
     feature_df['fx_pressure'] = feature_df['ret_3m'] - feature_df['local_ret_3']
     feature_df.drop(columns=['local_ret_3'], inplace=True)
 
-    # 市场压力
     feature_df['up_flag'] = (feature_df['ret_3m'] > 0).astype(int)
     market_up = feature_df.groupby(['countryiso3', 'market', 'year_month'])['up_flag'].transform('mean')
     feature_df['market_stress'] = market_up
     feature_df.drop(columns=['up_flag'], inplace=True)
 
-    # 距12个月高点距离
     monthly['price_12m_high'] = monthly.groupby('series_id')['usdprice'].transform(lambda x: x.rolling(12, min_periods=1).max())
     monthly_key2 = monthly[['series_id', 'date', 'usdprice', 'price_12m_high']].dropna()
     feature_df = feature_df.merge(monthly_key2, on=['series_id', 'date'], how='left')
     feature_df['dist_to_12m_high'] = (feature_df['price_12m_high'] - feature_df['usdprice']) / (feature_df['usdprice'] + 1e-6)
     feature_df.drop(columns=['usdprice', 'price_12m_high'], inplace=True)
 
-    # 汇率波动率
     monthly['fx_rate'] = monthly['usdprice'] / (monthly['price'] + 1e-6)
     monthly['fx_vol'] = monthly.groupby('series_id')['fx_rate'].transform(lambda x: x.rolling(6, min_periods=2).std())
     monthly_key3 = monthly[['series_id', 'date', 'fx_vol']].dropna()
@@ -196,14 +193,12 @@ def add_global_features(feature_df, monthly):
     feature_df['fx_volatility'] = feature_df['fx_vol'].fillna(0)
     feature_df.drop(columns=['fx_vol'], inplace=True)
 
-    # 价格偏离均线
     monthly['ma12'] = monthly.groupby('series_id')['usdprice'].transform(lambda x: x.rolling(12, min_periods=1).mean())
     monthly_key4 = monthly[['series_id', 'date', 'usdprice', 'ma12']].dropna()
     feature_df = feature_df.merge(monthly_key4, on=['series_id', 'date'], how='left')
     feature_df['price_vs_ma12'] = (feature_df['usdprice'] - feature_df['ma12']) / (feature_df['ma12'] + 1e-6)
     feature_df.drop(columns=['usdprice', 'ma12'], inplace=True)
 
-    # 全球类别涨幅
     global_cat = feature_df.groupby(['category', 'year_month'])['ret_3m'].transform('mean')
     feature_df['global_cat_ret_3m'] = global_cat
 
@@ -232,7 +227,6 @@ if __name__ == "__main__":
     feature_df, base_cols = build_features_parallel(monthly)
     feature_df = add_global_features(feature_df, monthly)
 
-    # 最终特征列（基础12 + 全局7）
     global_cols = ['rel_strength', 'fx_pressure', 'market_stress',
                    'dist_to_12m_high', 'fx_volatility', 'price_vs_ma12', 'global_cat_ret_3m']
     feat_cols = base_cols + global_cols
