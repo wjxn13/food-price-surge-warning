@@ -1,0 +1,17 @@
+# 数据文件（体积太大，不传 Git）
+*.parquet
+*.pkl
+*.pth
+*.zip
+*.csv
+
+# 生成的报告和图片
+*.html
+*.png
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 原始数据文件夹（保留本地但不上传）
+食品价格/
