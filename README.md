@@ -12,14 +12,14 @@
 ## 快速开始
 
 ### 1. 克隆仓库
-```bash   ”“bash
+```bash
 git clone https://github.com/wjxn13/food-price-surge-warning.git
 cd food-price-surge-warning
 ```
 
 ### 2. 安装依赖
-```bash   ”“bash
-pip install -r requirements.txtPIP install -r requirements.txt
+```bash
+pip install -r requirements.txt
 ```
 
 ### 3. 获取模型与特征数据
@@ -30,7 +30,7 @@ pip install -r requirements.txtPIP install -r requirements.txt
 - `scaler_v4.pkl`、`scaler_ensemble.pkl`、`feat_cols.json`
 
 ### 4. 运行仪表盘
-```bash   ”“bash
+```bash
 streamlit run app.py
 ```
 浏览器访问 http://localhost:8501 即可交互分析。
@@ -70,6 +70,23 @@ License: CC BY 3.0 IGO
 - 精确率 (Precision): 33.8%
 - 数据截止: 动态更新
 
+> 注：本任务为强不平衡的时序预警（正样本稀少、价格波动具时序相关性），F1 受标注/样本结构约束。上述为测试集（2024–2025）结果，阈值经网格搜索在验证集（2021–2023）上优选。
+
+## 模型优化路线（待做 / 可提升方向）
+
+当前 V4 已用 LightGBM + XGBoost + 纯 MLP 做 Stacking，下面几条是实测后判断的**性价比提升点**（尚未实现，留作后续）：
+
+1. **恢复 MLP 的类别嵌入**：`ensemble_v4.py` 中的 MLP 因 Embedding 对齐问题退化成「纯连续特征」网络，与树模型高度同质。加回 `category` / `countryiso3` 的 Embedding，能显著提升基学习器多样性，是 Stacking 增益的关键。
+2. **时序交叉验证替代单一切分**：现在只用 `date<=2020` / `2021–2023` / `2024–2025` 三段硬切。改用 **滚动窗口时序 CV**（如 2016–18 训、19–20 验，逐年外推）能更稳定地估计泛化，并防止相邻年份的信息泄漏。
+3. **特征工程增量**：
+   - 动量交叉（`ret_3m - ret_12m`）、波动率回归（近 3 月波动相对 12 月均值的倍数）；
+   - 与 12 月滚动均线的偏离、`dist_to_12m_high` 已在用，可补 **回撤深度**；
+   - 类别/国家层面的**滞后同比**（去年同期涨幅），捕捉年度周期。
+4. **阈值策略**：当前靠 0.1–0.9 网格搜最优 F1 阈值；可改用在验证集上最大化 **PR 曲线 / Youden J** 的自动阈值，并对不同国家/类别做阈值校准（正样本比例差异大）。
+5. **类别不平衡**：除现有 `scale_pos_weight` 外，可试 ** focal loss（MLP）** 或 **EasyEnsemble / 过采样**，直接拉升少数类召回。
+
+> 优化点与本项目数据/代码均已在本地 `D:\.kaggle\食品价格\` 验证可读，重训需本地 WFP CSV（见 `食品价格/` 子目录）与 `features_v4.parquet`。
+
 ## 文件结构
 
 ```
@@ -80,13 +97,13 @@ License: CC BY 3.0 IGO
 ├── deploy_demo.py             # 静态报告生成
 ├── build_price_cache.py       # 价格序列提取
 ├── feat_cols.json             # 特征列名
-├── requirements.txt           # Python 依赖
+├── requirements.txt           # Python 依赖（新增，详见上文）
 ├── .gitignore                 # Git 忽略规则
 ├── features_v4.parquet        # 特征缓存（需从 Release 下载）
 ├── price_series.parquet       # 价格序列（需从 Release 下载）
 ├── lgb_model.pkl / xgb_model.pkl / mlp_model.pth / meta_model.pkl  # 模型文件（需从 Release 下载）
 ├── scaler_v4.pkl / scaler_ensemble.pkl  # 标准化器（需从 Release 下载）
-└── 食品价格/                  # 原始 CSV（需自行下载或通过 auto_update.py 自动获取）
+└── 食品价格/                  # 原始 WFP CSV 子目录（本地数据，已被 .gitignore 忽略）
 ```
 
 ## 许可
