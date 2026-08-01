@@ -60,14 +60,18 @@ def build_monthly_panel(df):
     ).reset_index()
     monthly['date'] = monthly['year_month'].dt.to_timestamp()
 
-    monthly = monthly.set_index('date').groupby('series_id').resample('MS').mean()
-    monthly[['usdprice', 'price']] = monthly.groupby('series_id')[['usdprice', 'price']].transform(
-        lambda x: x.interpolate(method='linear', limit_direction='both', limit=3)
-    )
-    monthly[['usdprice', 'price']] = monthly.groupby('series_id')[['usdprice', 'price']].transform(
-        lambda x: x.fillna(x.median())
-    )
-    monthly = monthly.reset_index()
+    # 内存友好：逐序列重采样补月（避免一次性 groupby.resample 在 ~6.5 万序列上 OOM）
+    _frames = []
+    for _sid, _g in monthly.groupby('series_id'):
+        _g = _g.set_index('date').sort_index()[['usdprice', 'price']]
+        _g = _g.resample('MS').mean()
+        _g = _g.interpolate(method='linear', limit_direction='both', limit=3)
+        _g = _g.fillna(_g.median())
+        _g = _g.reset_index()
+        _g.insert(0, 'series_id', _sid)
+        _frames.append(_g)
+    monthly = pd.concat(_frames, ignore_index=True)
+    del _frames
 
     seq_lengths = monthly.groupby('series_id').size()
     valid = seq_lengths[seq_lengths >= WINDOW_SIZE + LOOKAHEAD].index
@@ -202,7 +206,8 @@ def add_global_features(feature_df, monthly):
     global_cat = feature_df.groupby(['category', 'year_month'])['ret_3m'].transform('mean')
     feature_df['global_cat_ret_3m'] = global_cat
 
-    feature_df.drop(columns=['year_month', 'countryiso3', 'market', 'category'], inplace=True)
+    feature_df.drop(columns=['year_month', 'market'], inplace=True)
+    # 保留 countryiso3 / category 作为 MLP 嵌入类别特征（在 save_cache 中整数编码）
     log("全局特征添加完成")
     return feature_df
 
@@ -213,9 +218,15 @@ def save_cache(feature_df, feat_cols):
     X = feature_df[feat_cols].values
     scaler = StandardScaler()
     scaler.fit(X[train_mask])
+    # ---- 类别特征整数编码（供 MLP embedding 使用，不进入 StandardScaler）----
+    country_map = {c: i for i, c in enumerate(sorted(feature_df['countryiso3'].dropna().unique()))}
+    cat_map = {c: i for i, c in enumerate(sorted(feature_df['category'].dropna().unique()))}
+    feature_df['country_code'] = feature_df['countryiso3'].map(country_map).fillna(-1).astype(int)
+    feature_df['cat_code'] = feature_df['category'].map(cat_map).fillna(-1).astype(int)
+    joblib.dump({'country': country_map, 'cat': cat_map}, 'cat_maps.pkl')
     feature_df.to_parquet('features_v4.parquet', index=False)
     joblib.dump(scaler, 'scaler_v4.pkl')
-    log(f"缓存已保存：features_v4.parquet 和 scaler_v4.pkl，特征数: {len(feat_cols)}")
+    log(f"缓存已保存：features_v4.parquet 和 scaler_v4.pkl，连续特征数: {len(feat_cols)}，国家数: {len(country_map)}，品类数: {len(cat_map)}")
 
 # ==================== 主流程 ====================
 if __name__ == "__main__":
